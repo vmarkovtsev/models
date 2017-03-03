@@ -136,6 +136,36 @@ bool NextWord(std::ifstream &fin, std::string* word) {
   return false;
 }
 
+int NextWordPtr(const char *end, const char *ptr, std::string* word) {
+  auto start = ptr;
+
+  // Skip leading whitespace.
+  for (; ptr != end && std::isspace(*ptr); ptr++) {}
+
+  if (ptr == end) {
+    return ptr - start;
+  }
+  auto word_start = ptr;
+
+  // Read the next word.
+  for (; ptr != end && !std::isspace(*ptr); ptr++) {}
+
+  word->assign(word_start, ptr);
+
+  if (*ptr == '\n' || ptr == end) {
+    return ptr - start;
+  }
+
+  // Skip trailing whitespace.
+  for (; ptr != end && std::isspace(*ptr); ptr++) {}
+
+  if (ptr == end) {
+    return ptr - start;
+  }
+
+  return ptr - start - 1;
+}
+
 // Creates a vocabulary from the most frequent terms in the input file.
 std::vector<std::string> CreateVocabulary(const std::string input_filename,
                                           const int shard_size,
@@ -147,30 +177,48 @@ std::vector<std::string> CreateVocabulary(const std::string input_filename,
   // consume all memory and should be re-written to periodically trim the data.)
   std::unordered_map<std::string, long long> counts;
 
-  std::ifstream fin(input_filename, std::ifstream::ate);
-
-  if (!fin) {
+  auto fin = open(input_filename.c_str(), O_RDONLY);
+  if (fin < 0) {
     std::cerr << "couldn't read input file '" << input_filename << "'"
               << std::endl;
 
     return vocab;
   }
-
-  const auto input_size = fin.tellg();
-  fin.seekg(0);
+  const auto input_size = lseek(fin, 0, SEEK_END);
+  std::remove_const<decltype(input_size)>::type offset = 0;
+  lseek(fin, 0, SEEK_SET);
 
   long long ntokens = 0;
-  while (!fin.eof()) {
+  const decltype(input_size) page_size = sysconf(_SC_PAGESIZE) * 8;
+  const int context_size = page_size * 2;
+  std::unique_ptr<char[]> context(new char[context_size]);
+  int context_offset = page_size;
+  while (offset < input_size) {
+    auto data = mmap(nullptr, page_size, PROT_READ, MAP_PRIVATE, fin, offset);
+    assert(data != MAP_FAILED);
+    auto read_size = std::min(page_size, input_size - offset);
+    memcpy(context.get() + page_size, data, read_size);
     std::string word;
-    NextWord(fin, &word);
-    counts[word] += 1;
-
-    if (++ntokens % 1000000 == 0) {
-      const float pct = 100.0 * static_cast<float>(fin.tellg()) / input_size;
-      fprintf(stdout, "\rComputing vocabulary: %0.1f%% complete...", pct);
-      std::flush(std::cout);
+    while (int eaten = NextWordPtr(context.get() + page_size + read_size,
+                                   context.get() + context_offset,
+                                   &word)) {
+      context_offset += eaten;
+      counts[word] += 1;
+      if (++ntokens % 1000000 == 0) {
+        const float pct = (100.0 * offset) / input_size;
+        fprintf(stdout, "\rComputing vocabulary: %0.1f%% complete...", pct);
+        std::flush(std::cout);
+      }
     }
+    int data_left_size = context_size - context_offset;
+    memcpy(context.get() + page_size - data_left_size,
+           context.get() + context_offset,
+           data_left_size);
+    munmap(data, page_size);
+    offset += page_size;
+    context_offset = page_size - data_left_size;
   }
+  close(fin);
 
   std::cout << counts.size() << " distinct tokens" << std::endl;
 
