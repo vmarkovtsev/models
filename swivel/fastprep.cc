@@ -376,6 +376,17 @@ void CoocBuffer::WriteShards() {
     // co-occurrence counts that we've spooled off to disk: these are in
     // arbitrary order and may contain duplicates.
     const off_t nbytes = lseek(fds_[shard], 0, SEEK_END);
+    if (nbytes >= (64 << 20)) {
+      std::cout << "Warning: you are likely to catch protobuf parsing errors "
+          "in TF 1.0 and older because the shard is too fat (>= 64MiB); see "
+          << std::endl <<
+          "kDefaultTotalBytesLimit in src/google/protobuf/io/coded_stream.h "
+          " changed in protobuf/commit/5a76e633ea9b5adb215e93fdc11e1c0c08b3fc74"
+          << std::endl <<
+          "https://github.com/tensorflow/tensorflow/issues/7311"
+          << std::endl <<
+          "Consider increasing the number of shards.";
+    }
     cooc_t *coocs = static_cast<cooc_t*>(
         mmap(0, nbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fds_[shard], 0));
 
